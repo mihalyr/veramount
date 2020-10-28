@@ -1,0 +1,119 @@
+#!/bin/bash
+# Mount encrypted truecrypt partition. Run as root.
+set -eu
+
+TOOLNAME="$(basename $0)"
+
+# Where to look for config files
+CONFIG_DIR="/etc/veramount.d"
+
+log() {
+	echo "[$(date +%FT%T%z)] ${TOOLNAME}: $*"
+}
+
+fail() {
+	log "$*"
+	exit 1
+}
+
+usage() {
+	echo
+	echo "Usage: $(basename $0) [-d|-h] config-name"
+    echo
+	echo "  config-name is filename absolute or relative to current directory or $CONFIG_DIR containig the mount"
+    echo "              configuration of a volume, one can be created using veramount-config"
+	echo "  Use -d to dismount"
+	echo "  Use -h to display usage"
+	echo
+	exit 1
+}
+
+fail_usage() {
+	log $*
+	usage
+}
+
+DISMOUNT=0
+CONFIG_NAME=""
+while [ $# -gt 0 ]; do
+	case $1 in
+		-d)
+			DISMOUNT=1
+			shift
+			;;
+		-h)
+			usage
+			;;
+		*)
+			if [ -z "$CONFIG_NAME" ]; then
+				CONFIG_NAME="$1"
+				shift
+			else
+				fail_usage "Unexpected argument: $1"
+			fi
+			;;
+	esac
+done
+
+# Root is needed for veracrypt
+if [ $EUID -ne 0 ]; then
+	echo "Script must be run as root."
+	exit 1
+fi
+
+# Find confg
+[ -z "$CONFIG_NAME" ] && fail_usage "Missing config name"
+CONFIG_FILE="$CONFIG_NAME"
+if [ ! -e "$CONFIG_FILE" ]; then
+	CONFIG_FILE="$CONFIG_DIR/$CONFIG_NAME"
+fi
+
+[ -e "$CONFIG_FILE" ] || fail_usage "No such config: $CONFIG_NAME"
+
+# Default values
+PARTUUID=""
+MOUNTPOINT=""
+KEYFILES=""
+MOUNTFS_OPTS="noatime"
+TRUECRYPT_MODE=0
+
+# Read config
+# TODO: This is dangerous as this script is run as root and we cannot just blindly source some file here.
+#       Need a proper method to read key-value pairs from config
+source "$CONFIG_FILE"
+
+# Check required params
+[ -z "$PARTUUID" ] && fail " Missing config option: PARTUUID"
+[ -z "$MOUNTPOINT" ] && fail " Missing config option: MOUNTPOINT"
+[ -z "$KEYFILES" ] && fail " Missing config option: KEYFILES"
+
+TRUECRYPT_OPT=""
+if [ $TRUECRYPT_MODE -eq 1 ]; then
+	TRUECRYPT_OPT="--truecrypt"
+fi
+
+# Execute
+if [ $DISMOUNT -eq 1 ]; then
+	if [ -d $MOUNTPOINT ] && findmnt $MOUNTPOINT >/dev/null; then
+		veracrypt --text --non-interactive --dismount $MOUNTPOINT
+		rmdir $MOUNTPOINT
+		log "Dismounted $MOUNTPOINT"
+	else
+		log "Not mounted at $MOUNTPOINT"
+		exit 1
+	fi
+else
+	if [ -e /dev/disk/by-partuuid/$PARTUUID ]; then
+		PARTDEVICE="$(readlink -e /dev/disk/by-partuuid/$PARTUUID)"
+	else
+		fail "Partition with UUID $PARTUUID not found"
+	fi
+
+	log "Partition found at $PARTDEVICE"
+	log "Opening VeraCrypt volume"
+
+	mkdir -p $MOUNTPOINT
+	veracrypt --text --non-interactive $TRUECRYPT_OPT --fs-options="$MOUNTFS_OPTS" --keyfiles=$KEYFILES $PARTDEVICE $MOUNTPOINT
+
+	log "$CONFIG_NAME mounted at $MOUNTPOINT"
+fi

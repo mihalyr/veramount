@@ -1,0 +1,271 @@
+#!/bin/bash
+# Configure veramount. Run as root.
+set -eu
+
+# Paths
+SHARE_DIR="/usr/local/share/veramount"
+CONFIG_DIR="/etc/veramount.d"
+SYSTEMD_DIR="/etc/systemd/system"
+UDEV_DIR="/etc/udev/rules.d"
+
+# Configuration options
+CONFIGNAME=""
+PARTUUID=""
+MOUNTPOINT=""
+KEYFILES=""
+MOUNTFS_OPTS="noatime"
+TRUECRYPT_MODE=0
+
+usage() {
+    echo "
+Generate veramount configuration that allows automounting of Veracrypt volumes
+with udev and systemd.
+
+Usage: $(basename $0) [ACTION] OPTIONS
+
+Actions:
+add                             Add new config [default]
+del                             Delete config and related files
+ls                              List all configs
+disable                         Disable a config
+enable                          Enable a disabled config
+
+Options for 'add':
+Required:
+-n --name CONFIGNAME            A name for the new configuration
+-p --partuuid PARTUUID          The UUID of the partition to be mounted
+-m --mountpoint MOUNTPOINT      Where to mount the filesystem
+-k --keyfiles KEYFILES          Keyfiles for automounting
+Optional:
+--fs-opts FS_OPTIONS            Any filesystem mount options to pass
+                                e.g. uid/gid, noatime. Defaults to none
+-tc --truecrypt                 Truecrypt compatibility mode
+
+Options for 'del', 'disable' and 'enable':
+-n --name CONFIGNAME            The name of the configuration to operate on
+
+Options for 'ls':
+none
+
+"
+    exit 1
+}
+
+# TODO: Hacked together to  make this work for personal use
+
+[ $# -gt 0 ] || usage
+
+ACTION="add" # default add
+case $1 in
+    add)
+        ACTION="add"
+        shift
+        ;;
+    del)
+        ACTION="del"
+        shift
+        ;;
+    ls)
+        ACTION="ls"
+        shift
+        ;;
+    disable)
+        ACTION="disable"
+        shift
+        ;;
+    enable)
+        ACTION="enable"
+        shift
+        ;;
+esac
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --name|-n)
+            CONFIGNAME="$2"
+            shift
+            shift
+            ;;
+        --partuuid|-p)
+            PARTUUID="$2"
+            shift
+            shift
+            ;;
+        --mountpoint|-m)
+            MOUNTPOINT="$2"
+            shift
+            shift
+            ;;
+        --keyfiles|-k)
+            KEYFILES="$2"
+            shift
+            shift
+            ;;
+        --fs-opts)
+            MOUNTFS_OPTS="$2"
+            shift
+            shift
+            ;;
+        --truecrypt|-tc)
+            TRUECRYPT_MODE=1
+            shift
+            ;;
+        *)
+            echo "Invalid argument: $1"
+            usage
+    esac
+done
+
+# Required options check
+case $ACTION in
+    add)
+        [ -z "$CONFIGNAME" ] || [ -z "$PARTUUID" ] || [ -z  "$MOUNTPOINT" ] || [ -z "$KEYFILES" ] && usage
+        ;;
+    ls)
+        ;;
+    del)
+        [ -z "$CONFIGNAME" ] && usage
+        ;;
+    disable)
+        [ -z "$CONFIGNAME" ] && usage
+        ;;
+    enable)
+        [ -z "$CONFIGNAME" ] && usage
+        ;;
+esac
+
+
+if [ "$ACTION" == "ls" ]; then
+    ls "$CONFIG_DIR"
+    exit 0
+fi
+
+# Root is needed to install the files
+if [ $EUID -ne 0 ]; then
+    echo "Script must be run as root."
+    exit 1
+fi
+
+SERVICE_NAME="veramount-${CONFIGNAME}.service"
+RULE_NAME="99-veramount-${CONFIGNAME}.rules"
+
+
+if [ "$ACTION" == "del" ]; then
+    echo "Deleting config: $CONFIGNAME"
+    rm -vf "$CONFIG_DIR/$CONFIGNAME"{,.disabled}
+    rm -vf "$SYSTEMD_DIR/$SERVICE_NAME"
+    rm -vf "$UDEV_DIR/$RULE_NAME"
+    echo "Reloading systemd..."
+    systemctl daemon-reload
+    echo "Reloading udev..."
+    udevadm control -R
+    echo "Config $CONFIGNAME has been deleted"
+    exit 0
+fi
+
+if [ "$ACTION" == "disable" ]; then
+    CONFIGS="$CONFIGNAME"
+    if [ "$CONFIGS" == "all" ]; then
+        set +e
+        CONFIGS="$(ls "$CONFIG_DIR" | grep -v disabled)"
+        set -e
+        if [ -z "$CONFIGS" ]; then
+            echo "No configs to disable."
+            exit 0
+        fi
+        echo "Disabling configs: $CONFIGS"
+    fi
+    for CONFIGNAME in $CONFIGS; do
+        echo "Disabling config: $CONFIGNAME"
+        mv -v "$CONFIG_DIR/$CONFIGNAME"{,.disabled}
+        rm -vf "$SYSTEMD_DIR/$SERVICE_NAME"
+        rm -vf "$UDEV_DIR/$RULE_NAME"
+        echo "Config $CONFIGNAME has been disabled"
+    done
+    echo "Reloading systemd..."
+    systemctl daemon-reload
+    echo "Reloading udev..."
+    udevadm control -R
+    exit 0
+fi
+
+if [ "$ACTION" == "enable" ]; then
+    echo "Enabling config: $CONFIGNAME"
+    if [ ! -e "$CONFIG_DIR/${CONFIGNAME}.disabled" ]; then
+        echo "No such disabled config."
+        exit 1
+    fi
+    mv -v "$CONFIG_DIR/${CONFIGNAME}.disabled" "$CONFIG_DIR/$CONFIGNAME"
+    # ouch
+    source $CONFIG_DIR/$CONFIGNAME
+
+    # Create systemd service
+    sed -e "s#__CONFIGNAME__#$CONFIGNAME#" "$SHARE_DIR/veramount-CONFIGNAME.service" > "$SYSTEMD_DIR/$SERVICE_NAME"
+
+    # Create udev rule
+    sed -e "s#__PARTUUID__#$PARTUUID#" -e "s#__SERVICE_NAME__#$SERVICE_NAME#" "$SHARE_DIR/99-veramount-CONFIGNAME.rules" > "$UDEV_DIR/$RULE_NAME"
+
+    echo "Reloading systemd..."
+    systemctl daemon-reload
+    echo "Reloading udev..."
+    udevadm control -R
+
+    echo "Installed files:"
+    echo "  $CONFIG_DIR/$CONFIGNAME"
+    echo "  $SYSTEMD_DIR/$SERVICE_NAME"
+    echo "  $UDEV_DIR/$RULE_NAME"
+
+    echo "Config $CONFIGNAME has been enabled"
+    exit 0
+fi
+
+
+
+# Continue with ACTION=add
+
+# Create config
+if [ -e "$CONFIG_DIR/$CONFIGNAME" ]; then
+    while true; do    
+        read -n 1 -t 5 -p "Configuration $CONFIGNAME exists at $CONFIG_DIR. Do you want to override? [y/N] " yn
+        [ -z "$yn" ] && yn=n
+        case $yn in
+            [yY]) break;;
+            [nN]) exit 1;;
+            *) echo "Please answer yes or no.";;
+        esac
+    done
+fi
+
+sed -e "s#__CONFIGNAME__#$CONFIGNAME#" -e "s#__PARTUUID__#$PARTUUID#" -e "s#__MOUNTPOINT__#$MOUNTPOINT#" -e "s#__KEYFILES__#$KEYFILES#" -e "s#__MOUNTFS_OPTS__#$MOUNTFS_OPTS#" -e "s#__TRUECRYPT_MODE__#$TRUECRYPT_MODE#" "$SHARE_DIR/CONFIGNAME" > "$CONFIG_DIR/$CONFIGNAME"
+
+
+# Create systemd service
+
+sed -e "s#__CONFIGNAME__#$CONFIGNAME#" "$SHARE_DIR/veramount-CONFIGNAME.service" > "$SYSTEMD_DIR/$SERVICE_NAME"
+
+
+# Create udev rule
+
+sed -e "s#__PARTUUID__#$PARTUUID#" -e "s#__SERVICE_NAME__#$SERVICE_NAME#" "$SHARE_DIR/99-veramount-CONFIGNAME.rules" > "$UDEV_DIR/$RULE_NAME"
+
+
+echo "Installed files:"
+echo "  $CONFIG_DIR/$CONFIGNAME"
+echo "  $SYSTEMD_DIR/$SERVICE_NAME"
+echo "  $UDEV_DIR/$RULE_NAME"
+
+echo "Reloading systemd..."
+systemctl daemon-reload
+
+echo "Reloading udev..."
+udevadm control -R
+
+echo "Config $CONFIGNAME successfully installed"
+echo
+echo "Test with:"
+echo "  - Triggering the udev rule, either via udevadm or plugging in the device"
+echo "  - Starting the service: systemctl start $SERVICE_NAME"
+echo "  - Invoking manually: veramount $CONFIGNAME"
+echo 
+
+

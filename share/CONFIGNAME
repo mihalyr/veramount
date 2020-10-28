@@ -1,0 +1,17 @@
+# Mount configuration for __CONFIGNAME__
+
+# Required configuration
+
+# The partition identifier, can be obtained using e.g. 'lsblk -o PARTUUID device'
+PARTUUID="__PARTUUID__"
+# Where to mount the volume, the directory will be created/removed when mounting/unmounting
+MOUNTPOINT="__MOUNTPOINT__"
+# Veracrypt keyfiles used for automated mounting
+KEYFILES="__KEYFILES__"
+
+# Optional configuration
+
+# Filesystem mount options passed to mount, e.g. uid/gid, noatime, ...
+MOUNTFS_OPTS="__MOUNTFS_OPTS__"
+# Truecrypt compatibility, defaults to 0 (no)
+TRUECRYPT_MODE=__TRUECRYPT_MODE__

@@ -1,0 +1,2 @@
+# Automatically mount veracrypt volume when available
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_PART_ENTRY_UUID}=="__PARTUUID__", ENV{SYSTEMD_WANTS}="__SERVICE_NAME__"

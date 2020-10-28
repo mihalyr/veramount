@@ -1,0 +1,10 @@
+[Unit]
+Description="veramount __CONFIGNAME__"
+Conflicts=umount.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/veramount __CONFIGNAME__
+RemainAfterExit=yes
+ExecStop=/usr/local/sbin/veramount -d __CONFIGNAME__
+
